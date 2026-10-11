@@ -79,6 +79,346 @@ job step finishes, `run.sh` performs one `--merge-only --delete-merged-parts`
 invocation, leaving the normal merged prediction output rather than four
 persistent part files.
 
+## Student Runbook: FiLM Evaluation and ML4Jets Plots
+
+Use this section for the epoch287 FiLM study and the existing ML4Jets figures.
+All commands in this section run from `lep_tree_ana/ml_pipeline`, using Bash.
+The separate generic A/B examples below are not the conditioned-FiLM recipe.
+
+### 1. Prepare the environment and review the YAMLs
+
+Activate the established NERSC evaluation Python environment first, then:
+
+```bash
+cd /path/to/lep_tree_ana/ml_pipeline
+source ../setup.sh
+export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+export MPLBACKEND=Agg
+export MPLCONFIGDIR="${TMPDIR:-/tmp}/ml4jets-mpl-${USER}"
+export XDG_CACHE_HOME="${TMPDIR:-/tmp}/ml4jets-cache-${USER}"
+mkdir -p "$MPLCONFIGDIR" "$XDG_CACHE_HOME" logs/film-evaluation
+set -o pipefail
+
+python3 -c 'import yaml, torch, awkward, pyarrow, numpy, scipy, matplotlib, ROOT; print("Host imports OK")'
+command -v srun
+command -v shifter
+```
+
+The host Python environment matters: prediction runs in the configured Shifter
+image, but the current launcher runs prediction merging, export, and fitting on
+the host. `setup.sh` adds analysis paths; it does not install ROOT or dependencies.
+Run inside a valid interactive compute allocation, not on a login node. The
+provided FiLM YAMLs request **4 nodes, 4 GPUs/node, 32 CPUs/node** for prediction.
+Obtain an allocation with the account/QOS allowed for your NERSC project. If using
+fewer nodes, change `predict.resources` identically in both YAMLs. `run.sh` launches
+job steps inside an existing allocation; it does not obtain one. Export/fit have
+`srun: false`, so they execute where this shell is running.
+
+| Arm | Pipeline YAML | Diffusion network YAML |
+| --- | --- | --- |
+| FiLM on | `config/pipelines/condition_epoch287_film_on.yaml` | `config/network_diffusion_epoch287_film_on.yaml` |
+| FFN FiLM off | `config/pipelines/condition_epoch287_film_ffn_off.yaml` | `config/network_diffusion_epoch287_film_ffn_off.yaml` |
+
+These use the pretrained checkpoint already configured in `condition_scratch.yaml`:
+`/global/cfs/cdirs/m5019/yiren/Ztautau/dgpo_omnifold_ztautau/condition_dgpo_diffusion/diffusion-film-epoch287.ckpt`.
+Training is disabled; no DGPO optimization runs. Both arms use raw `state_dict`
+weights (`disable_ema: true`), 20 sampling steps, and the same converted MC test
+input with split fraction `0.2`. The only network difference is:
+
+```yaml
+# Inside the complete diffusion network YAML, not predict.options.
+VisibleConditioning:
+  diffusion_enabled: true
+  diffusion_film_gains:
+    attention_gamma: 1.0
+    attention_beta: 1.0
+    ffn_gamma: 0.0  # The FiLM-on arm uses 1.0.
+    ffn_beta: 0.0   # The FiLM-on arm uses 1.0.
+```
+
+This removes the FFN input's conditional scale/shift, not the FFN itself. Keep
+`diffusion_enabled: true` so learned FiLM modules remain present when loading.
+The snippet above is explanatory: use the supplied complete network files.
+
+Before running, review both pipeline YAMLs:
+
+- Set `predict.model.evenet_root` to the updated collaborator checkout's
+  `evenet_dgpo` directory. Its visible-conditioning implementation must support
+  `diffusion_film_gains`; an old checkout may ignore the settings. The upstream
+  repository is [YirenNTU/dgpo-omnifold-pipeline](https://github.com/YirenNTU/dgpo-omnifold-pipeline),
+  with the reference network under `config/network_diffusion_epoch287_film_control.yaml`
+  on `feature/dgpo-omnifold-optimization`.
+- Confirm read access to both checkpoints, `predict.model.normalization`,
+  `predict.options.normalization_file`, converted inputs, and shape metadata.
+  The two normalization settings have different roles; preserve the checkpoint's
+  diffusion normalization and the classification/input normalization.
+- Replace owner-specific output paths with writable locations in **all** of
+  `predict.options.output_dir`, `eval.args`, and `fit.commands[*].args`. Keep the
+  two arms in different directories. Use fresh directories for a changed run.
+- Keep classification checkpoint, input files, split fraction, sampler, batch
+  size, resources, and analysis selections equal. The current analysis uses
+  `EveNetEvaluation.post_calibration: false`; preserve that for both arms.
+- A separate 100% FiLM checkpoint has not been identified here. Do not substitute
+  a legacy checkpoint or infer its architecture from a training percentage.
+
+Record the checkout revisions and retain the YAMLs with the run. The launcher
+saves each pipeline's resolved paths under `generated/<pipeline.name>/resolved_config.yaml`.
+Diffusion sampling currently has no enforced paired random seed between these
+arms; a small difference may require repeated runs before interpretation.
+
+### 2. Dry-run and check checkpoint compatibility
+
+```bash
+for arm in on ffn_off; do
+  ./run.sh "config/pipelines/condition_epoch287_film_${arm}.yaml" --dry-run \
+    2>&1 | tee "logs/film-evaluation/${arm}_dry-run.log" || exit 1
+done
+```
+
+Review the printed checkpoint, model root, output paths, and disabled training
+stage. A dry-run checks command construction, not remote files or model loading.
+Inside the compute allocation, run the existing CPU model check in the configured
+prediction container before generating events:
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import subprocess
+from scripts.generate_pipeline_shortcut import (
+    read_pipeline_config, write_resolved_config, predict_command, shifter_command,
+)
+
+for arm in ("on", "ffn_off"):
+    config = read_pipeline_config(Path(f"config/pipelines/condition_epoch287_film_{arm}.yaml"))
+    write_resolved_config(config)
+    command = predict_command(config) + ["--check-models-only"]
+    subprocess.run(shifter_command(command, config["predict"]["shifter"]), check=True)
+PY
+```
+
+Both checks must report strict checkpoint/schema loading success. Stop on missing
+files, missing/unexpected active weights, or tensor-shape mismatches; do not bypass
+strict loading. This check does not run inference or establish physics closure.
+
+### 3. Predict, export, then fit
+
+Run the stages separately for the first handoff so intermediate outputs can be
+checked. `--interactive` is essential here: without it the generator writes
+batch scripts instead of executing these commands.
+
+```bash
+for arm in on ffn_off; do
+  python3 scripts/generate_pipeline_shortcut.py \
+    --config "config/pipelines/condition_epoch287_film_${arm}.yaml" \
+    --stage predict --interactive \
+    2>&1 | tee "logs/film-evaluation/${arm}_predict.log" || exit 1
+done
+```
+
+Wait for both commands to finish successfully. Multi-node prediction automatically
+runs a final manifest-driven `--merge-only --delete-merged-parts` step. Check each
+prediction directory for `prediction_manifest.json` and the expected merged
+`*__evenet_pred.parquet` files. A manifest or some completed part files alone does
+not prove completion. If prediction/merge fails, stop and resolve incomplete
+tasks before export; do not hand-concatenate shards or glob part files into export.
+
+```bash
+for arm in on ffn_off; do
+  python3 scripts/generate_pipeline_shortcut.py \
+    --config "config/pipelines/condition_epoch287_film_${arm}.yaml" \
+    --stage eval --interactive \
+    2>&1 | tee "logs/film-evaluation/${arm}_export.log" || exit 1
+done
+```
+
+Set the following to the common parent of the two arm directories in your YAMLs.
+This shell variable is only for the checks/plots below; it does not override YAML
+paths. The supplied YAMLs currently use this location:
+
+```bash
+export FILM_RESULTS_ROOT=/pscratch/sd/t/tihsu/database/ZtautauAnalysis/ml_baseline_full_analysis_method
+for arm in on ffn_off; do
+  arm_dir="$FILM_RESULTS_ROOT/condition_epoch287_film_${arm}"
+  test -s "$arm_dir/qi/evenet/config_evenet.yaml" || exit 1
+  test -s "$arm_dir/qi/export_summary.json" || exit 1
+  python3 -m json.tool "$arm_dir/qi/export_summary.json"
+done
+```
+
+In each export summary, verify `prediction_files` contains all expected merged
+inputs, `counts`/`merged_outputs` cover the required samples and regions, and
+`post_calibration` is false. Investigate missing or unexpectedly empty regions
+before fitting. Do not apply the `0.2` MC split correction again during export:
+prediction has already applied it. `config_evenet.yaml` is created by export;
+its absence is a failed/incomplete stage, not a harmless fit warning.
+
+```bash
+for arm in on ffn_off; do
+  python3 scripts/generate_pipeline_shortcut.py \
+    --config "config/pipelines/condition_epoch287_film_${arm}.yaml" \
+    --stage fit --interactive \
+    2>&1 | tee "logs/film-evaluation/${arm}_fit.log" || exit 1
+done
+```
+
+For subsequent complete runs, `./run.sh <pipeline.yaml>` executes all enabled
+stages sequentially. To resume after a completed prediction/export, use the
+stage-specific commands above rather than rerunning the full pipeline.
+
+### 4. Compare the FiLM fit outputs with correct labels
+
+There are two different result sources under each arm:
+
+- `qi/evenet/run/QI_analysis/results.txt`: the QI result used by the pipeline's
+  own extraction command.
+- `qi/evenet/run/ForwardFoldingProcessor_asimovdata/results.txt`: the combined
+  forward-folding result used by the current ML4Jets uncertainty configuration.
+
+Use the **same processor** for both arms. The following compares forward-folding
+results; inspect both files for their `Combined fit regions:` block first:
+
+```bash
+export PLOT_ROOT="$FILM_RESULTS_ROOT/ML4Jets_Plot"
+mkdir -p "$PLOT_ROOT/film_epoch287"
+for arm in on ffn_off; do
+  result="$FILM_RESULTS_ROOT/condition_epoch287_film_${arm}/qi/evenet/run/ForwardFoldingProcessor_asimovdata/results.txt"
+  test -s "$result" || exit 1
+  rg -n 'Combined fit regions:|Concurrence' "$result" || exit 1
+done
+
+python3 extract_qi_final_measurements.py \
+  --method "FiLMOn:$FILM_RESULTS_ROOT/condition_epoch287_film_on/qi/evenet/run/ForwardFoldingProcessor_asimovdata/results.txt" \
+  --method "FFNFiLMOff:$FILM_RESULTS_ROOT/condition_epoch287_film_ffn_off/qi/evenet/run/ForwardFoldingProcessor_asimovdata/results.txt" \
+  --output-prefix "$PLOT_ROOT/film_epoch287/forward_folding" \
+  2>&1 | tee logs/film-evaluation/compare_forward_folding.log
+```
+
+This writes combined/per-channel JSON/CSV tables and comparison plots using the
+actual arm labels. Check the combined Concurrence central value and both errors,
+along with the individual B/C coefficients. To compare QI outputs separately,
+replace both input suffixes with `QI_analysis/results.txt` and use a distinct
+output prefix such as `qi_analysis`.
+
+The current exporter creates Asimov fits. Their nominal central values can stay
+at the MC reference while reconstruction changes the expected uncertainty.
+These results are not a direct measurement of concurrence from generated events.
+Generated-sample concurrence closure needs its own validated spin-observable
+calculation; none of the plotting commands below performs that calculation.
+
+### 5. Produce the existing ML4Jets figure set
+
+These three plotters are for the existing **Baseline versus DGPO** study. They
+currently assume those labels (and the QE/population plotters require those
+flags). Do not label FFN-FiLM-off as DGPO or invent a different training dataset
+size to force both FiLM arms into these figures. Use the labeled comparison in
+step 4 for the FiLM study; custom FiLM labels in the ML4Jets templates require a
+separate plotting change.
+
+| Figure group | Input configuration | Required completed stage |
+| --- | --- | --- |
+| Concurrence, B/C uncertainties and ratios | `config/uncertainty_scaling.yaml` | Fit |
+| Marginal W1, raw SWD, copula SWD | `config/ml4jets_population_metrics.yaml` | Prediction and merge |
+| Matched leptonic delta-phi truth/reconstruction panels | Two pipeline YAMLs plus `config/analysis.yaml` | Prediction and merge |
+
+Edit the existing YAMLs to select the intended methods and accessible paths.
+For an unevaluated Baseline/DGPO method, first execute its pipeline using the
+same stage sequence from step 3. Do not rerun training just to make plots.
+
+**Fit uncertainty figures:** check every enabled result path in
+`config/uncertainty_scaling.yaml`. It accepts combined forward-folding `results.txt`
+files or already-combined extraction JSON/CSV files. Remove unavailable entries
+and update `reference` to name retained entries; the plotter fails on missing
+required results instead of silently drawing a partial comparison.
+
+```bash
+python3 plot_ml4jets_final_qe_summary.py \
+  --config config/uncertainty_scaling.yaml \
+  --output-dir "$PLOT_ROOT/qe_summary" \
+  --layout all --formats png pdf svg \
+  2>&1 | tee logs/film-evaluation/ml4jets_qe_summary.log
+```
+
+`--layout all` writes six figure stems: concurrence sensitivity, concurrence
+uncertainty, polarization uncertainty, correlation uncertainty, the three-panel
+QE summary, and `ml4jets_bc_uncertainty_row`. With the three requested formats,
+expect **18 image files**. Reference-ratio panels are inside the B/C-row figure.
+Use `--layout summary` for the original five figures or `--layout bc-row` for
+only the B/C row. YAML `metrics` controls the B/C ordering; preserve all directed
+off-diagonal terms (`C_kn` and `C_nk` are distinct). Dataset sizes describe
+**Training dataset size**, not evaluation event counts or optimization steps.
+
+**Population figures:** `--config` must be `ml4jets_population_metrics.yaml`,
+not `uncertainty_scaling.yaml` (the latter lacks `analysis_config`). Each method
+needs `dataset_size` and `flag` directly or through an active `size_key` entry in
+the size configuration. Currently the 250k entries in `uncertainty_scaling.yaml`
+are commented out while population methods still include them. If retaining
+those prediction methods, add their metadata to the existing `methods` mapping:
+
+```yaml
+methods:
+  baseline_250k:
+    pipeline: pipelines/baseline_pct0p05.yaml
+    dataset_size: 250000
+    flag: Baseline
+  DGPO_250k:
+    pipeline: pipelines/DGPO_pct0p05.yaml
+    dataset_size: 250000
+    flag: DGPO
+  # Retain the other intended methods from the original file.
+```
+
+Alternatively remove these methods if they are outside the requested comparison.
+Keep the existing `DGPO_550k.size_key: DGPO_v2_500k` mapping. Set
+`skip_missing_inputs: false` for a complete handoff figure set; if intentionally
+left true, report every skipped method from `population_metrics.json`.
+
+```bash
+python3 plot_ml4jets_population_metrics.py \
+  --config config/ml4jets_population_metrics.yaml \
+  --output-dir "$PLOT_ROOT/population" --formats png pdf \
+  2>&1 | tee logs/film-evaluation/ml4jets_population.log
+```
+
+Expect `population_metrics.json`, `population_w1.csv`, `population_swd.csv`,
+W1/SWD figures, and the configured optional joint-2D diagnostic. Bootstrap is
+off by default. W1/SWD are distribution diagnostics, not unfolding uncertainty
+or conditional posterior coverage. See
+[the population-metrics guide](README_ML4JETS_POPULATION_METRICS.md) for definitions,
+weighting, common targets, and optional bootstrap settings.
+
+**Matched delta-phi panels:** explicitly choose two pipelines from the same
+training dataset size and identical converted test-input provenance. Example:
+
+```bash
+python3 plot_ml4jets_final_delta_phi.py \
+  --analysis-config config/analysis.yaml \
+  --baseline-pipeline config/pipelines/baseline_pct0p05.yaml \
+  --dgpo-pipeline config/pipelines/DGPO_pct0p05.yaml \
+  --output-dir "$PLOT_ROOT/delta_phi_250k" \
+  2>&1 | tee logs/film-evaluation/ml4jets_delta_phi.log
+```
+
+This writes `ml4jets_delta_phi_lv.{png,pdf,svg}`, matching signal-MC events and
+valid e/mu tau legs, and prints wrapped-residual MAE and displayed weight fraction.
+It compares the stored tau-minus-visible direction offsets. Use the same
+selection, event weights, bins, and color normalization for both methods; the
+script handles these shared choices and rejects incompatible input provenance.
+
+### 6. Return the artifacts
+
+Send the supervisor the run YAMLs and code revisions, logs, both prediction
+manifests and export summaries, the two original processor result files,
+FiLM comparison JSON/CSV/plots, and the ML4Jets PNG/PDF/SVG outputs with the
+population JSON/CSV. Report missing methods, fit failures, and whether errors
+are Asimov fit errors, event bootstrap intervals, or projection-seed spread.
+Inspect the figures for labels, missing series, clipping, and the expected
+18-file QE output set before sending them.
+
+The supplied FiLM configurations have passed local YAML/launcher/runtime-setting
+checks. NERSC checkpoint loading, event inference, fits, and production figures
+still require execution and inspection. A smaller fit uncertainty alone does
+not establish improved generated-sample closure.
+
 ## Evaluate Checkpoint A and B
 
 This path uses standard `EveNet-Full`; `evenet_dgpo` is not involved. Run the
