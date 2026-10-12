@@ -1,5 +1,7 @@
 # Detector input converter (2026-10-12)
 
+**Status correction, 2026-10-12:** the user requires input-only changes and unchanged EveNet Core/Align runtime. Our Core bool-dtype modification and three Align runtime modifications have been reversed with history-preserving reverts. Converter work and engineering evidence are retained, but the custom zero-global adapter training path described below is superseded and currently unavailable. Do not run its training wrapper/config until the converter emits the existing standard supervised format. Future scope is normal supervised classification and neutrino prediction; no DGPO/RL changes. The remaining sections record the earlier engineering contract/evidence, not current default-training readiness.
+
 `build_evenet_input_from_parquet.py` fits/applies a missingness-aware feature contract for the additive `particle_detector` version1 Parquet payload. It replaces the absent documented converter entrance for this schema; legacy inputs are unsupported. The converter and normal streaming loader support **classification only**. Audited charge-ordered targets are constructed as described below; invisible, assignment, segmentation, generation and RL targets are unsupported. Original truth stays in source columns, outside model features. An approved train/validation/test split remains a prerequisite for production training.
 
 All input Arrow columns, their order, physical types and metadata are retained as a prefix. Tensor columns are appended. Event identity, original signed weight (also copied to event_weight/central_weight), truth and the complete raw detector JSON remain available. No luminosity normalization is repeated. Region selection uses saved `regions` metadata and `region_mask`, or explicit `all`; no nprong or PDG selection is added. Particles use ascending original MAIN index, with all arrays aligned and indices saved; a trackless or zero-pT real particle remains present. Capacity overflow fails rather than truncating. Production capacity is an explicit caller decision, not established by the smoke sample.
@@ -23,7 +25,7 @@ Use an environment with the repository's dependencies and initialized submodules
 ```sh
 python build_evenet_input_from_parquet.py fit --input TRAIN.parquet --output TRAIN_features --normalization normalization.json --role train --split-id APPROVED_TRAIN --region all --max-particles CAPACITY --validation-features VALIDATION_features
 python build_evenet_input_from_parquet.py apply --input VALIDATION.parquet --output VALIDATION_features --normalization normalization.json --role validation --split-id APPROVED_VALIDATION --region all --max-particles CAPACITY
-python train_detector_classification.py TRAIN_features/train_classification.yaml --ray_dir RUN_DIRECTORY
+# Training command unavailable pending standard-format input conversion
 python smoke_detector_inputs.py TRAIN_features --rows 2
 python test_detector_inputs.py
 ```

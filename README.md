@@ -1458,4 +1458,4 @@ Each parent repository stores the exact commit of its child submodule.
 
 ### Additive detector Parquet inputs
 
-For the 2026-10-12 MAIN detector payload, see [DETECTOR_INPUTS.md](DETECTOR_INPUTS.md). The fit/apply converter preserves original columns and exposes explicit validity masks; the documented adapter smoke checks the existing seven-slot grouped encoder. Audited classification targets and the normal supervised loader are integrated; invisible/generation/RL targets remain unsupported. Production splits and resource approval are still required.
+For the 2026-10-12 MAIN detector payload, see [DETECTOR_INPUTS.md](DETECTOR_INPUTS.md). The fit/apply converter preserves original columns and exposes explicit validity masks; the documented adapter smoke checks the existing seven-slot grouped encoder. Audited classification targets and detector feature conversion are retained. The custom backend integration was reversed at the user’s request: default training is currently unavailable for these zero-global shards pending standard-format input conversion. Planned scope is normal supervised classification and neutrino prediction, with no DGPO/RL changes.
