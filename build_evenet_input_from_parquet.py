@@ -70,39 +70,8 @@ def fit_tables(tables,capacity,provenance,analysis_config=None):
 
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('mode',choices=['fit','apply']);p.add_argument('--input',nargs='+',required=True,type=Path);p.add_argument('--output',required=True,type=Path);p.add_argument('--normalization',required=True,type=Path);p.add_argument('--role',required=True,choices=['train','validation','test','data','smoke']);p.add_argument('--split-id',required=True,help='Owner-defined pre-existing split designation; no automatic splitting');p.add_argument('--region',required=True,help='Saved region name, or explicit all');p.add_argument('--max-particles',required=True,type=int);p.add_argument('--batch-size',type=int,default=128);p.add_argument('--max-events',type=int)
-    p.add_argument('--analysis-config',type=Path,default=DEFAULT_CONFIG);p.add_argument('--validation-features',type=Path,help='Separate validation apply output for generated training config')
-    a=p.parse_args();analysis_config=read_yaml(a.analysis_config);class_contract=classification_contract(analysis_config)
-    if a.max_particles<=0 or a.batch_size<=0 or (a.max_events is not None and a.max_events<=0):p.error('Bounds must be positive')
-    if a.output.exists():p.error('Fresh output directory required')
-    contract={'region':a.region,'max_particles':a.max_particles,'feature_fingerprint':FINGERPRINT}
-    provenance={'input_files':[{'path':str(f.resolve()),'bytes':f.stat().st_size,'rows':pq.ParquetFile(f).metadata.num_rows,'schema_sha256':hashlib.sha256(pq.ParquetFile(f).schema_arrow.serialize().to_pybytes()).hexdigest()} for f in a.input],'role':a.role,'split_id':a.split_id,'region':a.region,'max_events':a.max_events,'max_particles':a.max_particles,'contract':contract}
-    if a.mode=='fit':
-        if a.role!='train':p.error('Fit requires explicit train split inputs; no validation/data/smoke refits')
-        if a.normalization.exists():p.error('Normalization artifact already exists')
-        n=fit_tables(batches(a.input,a.region,a.batch_size,a.max_events),a.max_particles,provenance,analysis_config)
-        a.normalization.parent.mkdir(parents=True,exist_ok=True);a.normalization.write_text(json.dumps(n,indent=2)+'\n')
-    else:
-        n=json.loads(a.normalization.read_text())
-        if n['classification_contract']!=class_contract:p.error('Classification contract mismatch')
-        if n['provenance']['contract']!=contract:p.error('Selection/capacity normalization contract mismatch')
-    a.output.mkdir(parents=True);count=0;shards=[];shapes={};reason_counts={} 
-    for source in batches(a.input,a.region,a.batch_size,a.max_events):
-        e=extract(source.to_pylist(),a.max_particles);x=apply_normalization(e,n);labels,reasons=targets(source.to_pylist(),analysis_config)
-        for reason in reasons:reason_counts[reason]=reason_counts.get(reason,0)+1
-        table,shapes=tensor_table(source,x,e,labels);table=table.append_column('classification_reason',pa.array(reasons));name=f'part-{len(shards):05d}.parquet';pq.write_table(table,a.output/name,compression='zstd');shards.append({'path':name,'rows':len(table)});count+=len(table)
-    (a.output/'analysis_detector.yaml').write_text(yaml.safe_dump(grouped_config(),sort_keys=False));(a.output/'shape_metadata.json').write_text(json.dumps(shapes,indent=2)+'\n')
-    manifest={**provenance,'fingerprint':FINGERPRINT,'sequential_features':list(RAW_NAMES),'raw_value_names':list(FEATURES),'normalization':str(a.normalization.resolve()),'normalization_sha256':hashlib.sha256(a.normalization.read_bytes()).hexdigest(),'rows':count,'shards':shards,'classification_contract':class_contract,'classification_reason_counts':reason_counts,'task_targets':'Classification only; unknown/unmapped/data are ineligible with target -1'}
-    import sys,torch
-    sys.path.insert(0,str(Path(__file__).parent/'EveNet-Align'))
-    from detector_classification import backend_normalization,training_config
-    from generate_event_info_yaml import parse_feature_config,parse_evenet_config,build_event_info_payload
-    schema=parse_evenet_config(read_yaml(Path(__file__).parent/'config/evenet_schema.yaml'),grouped_config(),parse_feature_config(grouped_config()))
-    event_info=build_event_info_payload(class_contract['classes'],parse_feature_config(grouped_config()),schema)
-    event_info['GENERATIONS']={'Conditions':[],'GlobalTargets':[],'Events':[],'Neutrinos':{}}
-    (a.output/'train_classification.yaml').write_text(yaml.safe_dump(training_config(a.output,class_contract,a.validation_features),sort_keys=False))
-    torch.save(backend_normalization(n,class_contract),a.output/'normalization.pt')
-    (a.output/'event_info.yaml').write_text(yaml.safe_dump(event_info,sort_keys=False))
-    (a.output/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n');print(json.dumps({'rows':count,'features':len(RAW_NAMES),'output':str(a.output)}))
+    # Canonical CLI uses ordinary numerical shards and unchanged backend.
+    from standard_detector_converter import main as standard_main
+    standard_main()
 
 if __name__=='__main__':main()
