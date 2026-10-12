@@ -1458,6 +1458,4 @@ Each parent repository stores the exact commit of its child submodule.
 
 ### Additive detector Parquet inputs
 
-For the 2026-10-12 MAIN detector payload, see [DETECTOR_INPUTS.md](DETECTOR_INPUTS.md). The fit/apply converter preserves original columns and exposes explicit validity masks; the documented adapter smoke checks the existing seven-slot grouped encoder. Audited classification targets and detector feature conversion are retained. The custom backend integration was reversed at the user’s request: default training is currently unavailable for these zero-global shards pending standard-format input conversion. Planned scope is normal supervised classification and neutrino prediction, with no DGPO/RL changes.
-
-Current detector conversion and unchanged supervised classification/TruthGeneration entrance: [standard converter contract](DETECTOR_INPUTS.md). The earlier custom zero-global adapter is superseded.
+For the 2026-10-12 MAIN detector payload, see [DETECTOR_INPUTS.md](DETECTOR_INPUTS.md). The canonical fit/apply converter emits standard numerical shards with410detector channels and explicit validity flags; original columns, identities and raw payload remain in keyed source companions. The unchanged loader supports normal supervised classification and angular TruthGeneration with eight current global channels and the owner-approved saved-photon reference. A top-level preflight enforces frozen train-only normalization and separate validation. The previous custom zero-global adapter is superseded. No Core/Align edits, DGPO or RL are required.
