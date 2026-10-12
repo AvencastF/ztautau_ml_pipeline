@@ -55,6 +55,23 @@ class Tests(unittest.TestCase):
             with self.assertRaises(ValueError):validate_training_inputs(f)
             e=read_yaml(Path(c['event_info']['default']));e['INPUTS']['SEQUENTIAL']['Source']['Part_energy']='normalize';ep.write_text(yaml.safe_dump(e,sort_keys=False))
             with self.assertRaises(ValueError):validate_training_inputs(f)
+    def test_classification_only_without_angular_payload(self):
+        from unittest.mock import patch
+        from standard_detector_converter import arrays
+        from detector_inputs import FEATURES,RAW_NAMES
+        row={'identity':['Z_ee',1994,1,1],'process':'Z_ee','weight':-2.,'axis':[1.,0.,0.],'particle_detector':json.dumps({'version':1,'status':'available','particles':[],'collections':{}})}
+        n={'fit_role':'train','fingerprint':__import__('detector_inputs').FINGERPRINT,'feature_names':list(RAW_NAMES),'raw_value_names':list(FEATURES),'mean':[0.]*len(FEATURES),'std':[1.]*len(FEATURES),'count':[1]*len(FEATURES),'provenance':{'contract':{'tasks':'classification'}},'global':{'mean':[0.]*4,'std':[1.]*4,'count':[1]*4}}
+        with patch('standard_detector_converter.angular_targets',side_effect=AssertionError('must not read angular truth')):
+            data,eligible,_,why=arrays([row],n,2,read_yaml(DEFAULT_CONFIG))
+        self.assertTrue(eligible[0]);self.assertNotIn('x_invisible',data);self.assertEqual(data['event_weight'][0],-2.);self.assertEqual(why,['task_disabled'])
+    def test_deterministic_identity_split(self):
+        from split_detector_parquet import validation_identity
+        identity=['Z_tautau',1994,1,2];self.assertEqual(validation_identity(identity),validation_identity(json.dumps(identity)))
+        train=set();validation=set()
+        for i in range(100):
+            digest,isval=validation_identity(['Z_tautau',1994,1,i]);(validation if isval else train).add(digest)
+        self.assertEqual(len(train|validation),100);self.assertFalse(train&validation);self.assertTrue(10<len(validation)<35)
+        with self.assertRaises(ValueError):validation_identity(None)
     def test_actual_alignment_and_target_masks(self):
         path=os.environ.get('DETECTOR_SOURCE_FIXTURE')
         if not path:self.skipTest('Set DETECTOR_SOURCE_FIXTURE for genuine bounded source')
