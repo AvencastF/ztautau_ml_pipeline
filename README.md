@@ -1455,3 +1455,7 @@ out:
 4. update and commit the `ml_pipeline` pointer in `lep_tree_ana`
 
 Each parent repository stores the exact commit of its child submodule.
+
+### Additive detector Parquet inputs
+
+For the 2026-10-12 MAIN detector payload, see [DETECTOR_INPUTS.md](DETECTOR_INPUTS.md). The fit/apply converter preserves original columns and exposes explicit validity masks; the documented adapter smoke checks the existing seven-slot grouped encoder. Task targets require separate explicit integration before training.
